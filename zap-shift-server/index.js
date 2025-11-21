@@ -4,8 +4,22 @@ const app = express()
 require('dotenv').config()
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
+// ----strip =---
+const stripe = require('stripe')(process.env.STRIPE);
+
 
 const port = process.env.PORT || 3000
+
+// --genared tokon ---
+const crypto = require("crypto");
+
+function generateTrackingId() {
+    const prefix = "PRCL"; // your brand prefix
+    const date = new Date().toISOString().slice(0, 10).replace(/-/g, ""); // YYYYMMDD
+    const random = crypto.randomBytes(3).toString("hex").toUpperCase(); // 6-char random hex
+
+    return `${prefix}-${date}-${random}`;
+}
 
 /// middleware
 app.use(express.json())
@@ -30,6 +44,9 @@ async function run() {
         // ====create Db ===
         const db = client.db("zpa_shift_DB");
         const parcelCollection = db.collection("parcels");
+        const paymentCollection = db.collection("payments");
+
+
         // --- parcel api ---
         app.get('/parcels', async (req, res) => {
             // console.log(res)
@@ -44,9 +61,9 @@ async function run() {
             const result = await cursor.toArray()
             res.send(result)
         })
-        app.get(`/parcels/:id`,async(req,res)=>{
+        app.get(`/parcels/:id`, async (req, res) => {
             const id = req.params.id
-            const query ={_id: new ObjectId(id)}
+            const query = { _id: new ObjectId(id) }
             const result = await parcelCollection.findOne(query)
             res.send(result)
         })
@@ -65,7 +82,107 @@ async function run() {
             res.send(result)
         })
 
+        // -------payment reledated api ---------
 
+        // --new--
+        app.post('/payment-checkout-session', async (req, res) => {
+            const paymentInfo = req.body
+            const amount = Number(paymentInfo.cost)
+            const session = await stripe.checkout.sessions.create({
+                line_items: [
+                    {
+                        price_data: {
+                            currency: 'usd',
+                            unit_amount: amount * 100,
+                            product_data: {
+                                name: `please pay for ${paymentInfo.parcelName}`
+                            }
+                        },
+                        quantity: 1,
+                    },
+                ],
+                mode: 'payment',
+                metadata: {
+                    parcelId: paymentInfo.parcelId,
+                    parcelName: paymentInfo.parcelName
+                },
+                customer_email: paymentInfo.senderEmail,
+                success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+                cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cencelled`
+            })
+            res.send({ url: session.url })
+        })
+        // ---- old ---
+        app.post('/create-checkout-session', async (req, res) => {
+            const paymentInfo = req.body
+            const amount = parseInt(paymentInfo.cost) * 100
+            const session = await stripe.checkout.sessions.create({
+                line_items: [
+                    {
+                        price_data: {
+                            currency: 'USD',
+                            unit_amount: amount,
+                            product_data: {
+                                name: paymentInfo.parcelName,
+                            }
+                        },
+                        quantity: 1,
+                    },
+                ],
+                customer_email: paymentInfo.senderEmail,
+                mode: 'payment',
+                metadata: {
+                    parcelId: paymentInfo.parcelId,
+                },
+                success_url: `${process.env.SITE_DOMAIN}/dashboard/payment-success`,
+                cancel_url: `${process.env.SITE_DOMAIN}/dashboard/payment-cencelled`,
+            });
+            console.log(session)
+            res.send({ url: session.url })
+        })
+
+        // -data upadet --
+        app.patch('/payment-success', async (req, res) => {
+            const sessionId = req.query.session_id;
+            const session = await stripe.checkout.sessions.retrieve(sessionId)
+            const trackingId = generateTrackingId()
+
+            if (session.payment_status === 'paid') {
+                const id = session.metadata.parcelId
+                const query = { _id: new ObjectId(id) }
+                const updateData = {
+                    $set: {
+                        paymentStatus: 'paid',
+                        trackingId: trackingId
+
+                    }
+                }
+                const result = await parcelCollection.updateOne(query, updateData)
+                const paymentData = {
+                    customerEmail: session.customer_email,
+                    currency: session.currency,
+                    amount: session.amount_total / 100,
+                    paymentStatus: session.payment_status,
+                    parcelId: session.metadata.parcelId,
+                    parcelName: session.metadata.parcelName,
+                    transactionalId: session.payment_intent,
+
+                    paidAt: new Date()
+                }
+                if (session.payment_status === 'paid') {
+                    const paymentResult = await paymentCollection.insertOne(paymentData)
+                    res.send({
+                        success: true,
+                        trackingId: trackingId,
+                        transactionalId: session.payment_intent,
+                        modifyParcel: result,
+                        paymentInfo: paymentResult
+                    })
+                }
+            }
+            console.log('seeion :', session)
+            res.send({ success: false })
+        })
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
