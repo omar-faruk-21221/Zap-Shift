@@ -84,7 +84,20 @@ async function run() {
 
         // -------payment reledated api ---------
 
-        // --new--
+        /// get payment data
+        app.get('/payments', async (req, res) => {
+            const email = req.query.email;
+            const query = {}
+            if (email) {
+                query.customerEmail = email
+            }
+            const cursor = paymentCollection.find(query)
+            const result = await cursor.toArray()
+            res.send(result)
+
+        })
+
+        // --PAYMENT DATA CREATE AND POST JDATA BASE ---
         app.post('/payment-checkout-session', async (req, res) => {
             const paymentInfo = req.body
             const amount = Number(paymentInfo.cost)
@@ -141,11 +154,23 @@ async function run() {
             res.send({ url: session.url })
         })
 
-        // -data upadet --
+        // -payment data added and  upadet --
         app.patch('/payment-success', async (req, res) => {
             const sessionId = req.query.session_id;
             const session = await stripe.checkout.sessions.retrieve(sessionId)
             const trackingId = generateTrackingId()
+
+            // ----stop data dubble ---------
+            const transactionalId = session.payment_intent
+            const query = { transactionalId: transactionalId }
+            const paymentExist = await paymentCollection.findOne(query)
+            console.log(paymentExist)
+            if (paymentExist) {
+                return res.send({
+                    massage: 'Already Exist this Parcel', transactionalId,
+                    trackingId: paymentExist.trackingId
+                })
+            }
 
             if (session.payment_status === 'paid') {
                 const id = session.metadata.parcelId
@@ -166,7 +191,7 @@ async function run() {
                     parcelId: session.metadata.parcelId,
                     parcelName: session.metadata.parcelName,
                     transactionalId: session.payment_intent,
-
+                    trackingId: trackingId,
                     paidAt: new Date()
                 }
                 if (session.payment_status === 'paid') {
@@ -176,13 +201,18 @@ async function run() {
                         trackingId: trackingId,
                         transactionalId: session.payment_intent,
                         modifyParcel: result,
-                        paymentInfo: paymentResult
+                        paymentInfo: paymentResult,
+
                     })
                 }
             }
             console.log('seeion :', session)
             res.send({ success: false })
         })
+
+
+
+
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
     } finally {
